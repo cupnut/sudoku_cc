@@ -27,6 +27,7 @@ typedef struct {
 typedef struct {
   int overlaps;
   int allowDups;
+  int numDupsAllowed;
   int* digitUseCounts;
 } cageparams_t;
 
@@ -39,7 +40,7 @@ size_t arglen(char* str, size_t strlen, int start) {
 }
 
 int getint(char* str, size_t len) {
-  if(len == 0 || !str) return 0;
+  if(len == 0 || !str) return -1;
 
   int number = 0;
   int polarity = 1;
@@ -96,16 +97,17 @@ void find_combinations(int total, int spots, int startDigit, int digitsInUse, in
   for(int i = startDigit; i <= SUDOKU_DIGIT_NUM; ++i) {
     if(i > total) return;
 
+    int asIndex = i - 1;
     // A 1 indicates that a digit can *not* be used. Therefore, XOR
-    int isAvail = ((digitsInUse & (1 << (i - 1))) ^ (1 << (i - 1)));
+    int isAvail = ((digitsInUse & (1 << (asIndex))) ^ (1 << (asIndex)));
     
     if(isAvail) { 
       if(cp->overlaps) {
         // A digit can only be used twice in a *standard* cage
-        if(cp->digitUseCounts[i] >= 2) {
+        if(cp->digitUseCounts[asIndex] >= cp->numDupsAllowed) {
           continue;
         }
-        ++cp->digitUseCounts[i];
+        ++cp->digitUseCounts[asIndex];
       }
       
       currentCombination[depth] = i;
@@ -114,9 +116,8 @@ void find_combinations(int total, int spots, int startDigit, int digitsInUse, in
 
       find_combinations(total - i, spots, nextDigit, digitsInUse, currentCombination, depth + 1, sb, cp, 0);
 
-      if(cp->overlaps && recursionStart) {
-        memset(cp->digitUseCounts, 0, SUDOKU_DIGIT_NUM);
-      }
+      if(cp->overlaps)
+        --cp->digitUseCounts[asIndex];
     }
   }
 }
@@ -131,15 +132,24 @@ char* handle_cage(int boxTotal, int numSpots, int digitsInUse, int overlapsBoxes
 
   // reset buffers
   memset(outBuffer, 0, BUFFERSIZE);
-  memset(digitUseCounts, 0, SUDOKU_DIGIT_NUM);
-  memset(currentCombination, 0, SUDOKU_DIGIT_NUM);
+  memset(digitUseCounts, 0, sizeof(digitUseCounts));
+  memset(currentCombination, 0, sizeof(currentCombination));
 
   strbuilder_t sb = { .buffer = outBuffer, .size = 0, .cap = BUFFERSIZE };
-  cageparams_t cp = { .overlaps = overlapsBoxes, .allowDups = allowDuplicates, .digitUseCounts = digitUseCounts};
+  cageparams_t cp = { .overlaps = overlapsBoxes, .allowDups = allowDuplicates, .numDupsAllowed = 2, .digitUseCounts = digitUseCounts};
 
   find_combinations(boxTotal, numSpots, 1, digitsInUse, currentCombination, 0, &sb, &cp, 1);
 
   if(sb.size == 0) return "\0";
+  return outBuffer;
+}
+
+char* handle_x33(int x33TotalCageValue) {
+  enum {
+    BUFFERSIZE = 32
+  };
+  static char outBuffer[BUFFERSIZE];
+  sprintf(outBuffer, "%d\n\0", x33TotalCageValue - SUDOKU_DIGIT_MAX);
   return outBuffer;
 }
 
@@ -150,100 +160,152 @@ int parse_targetbox(char* str) {
   return INVALID;
 }
 
-int main(int argc, char** argv) {
+int parsecmd_x33(int it, size_t bytesRead, char* inputBuffer) {
+  if(it >= bytesRead) {
+    printf("Invalid Input\n");
+    return -1;
+  }
+
+  size_t argLength = arglen(inputBuffer, bytesRead, it);
+  int numread = getint(inputBuffer + it, argLength);
+
+  if(numread == -1) {
+    printf("x33 cmd: missing number as seccond argument");
+  }
+
+  return numread;
+}
+
+struct parsecmd_cage_t { 
+  int success;
+  int boxTotal;
+  int boxSpots;
+  int digitsInUse;
+} parsecmd_cage(int it, size_t bytesRead, char* inputBuffer) {
+  int ordinal = 0;
+
+  struct parsecmd_cage_t pct = {
+    .success = 0,
+    .boxTotal = 0, // cages's sum of its digits
+    .boxSpots = 0, // number of digits in  the cage
+    .digitsInUse = 0
+  };
+
+  while(it < bytesRead) {
+    size_t argLength = arglen(inputBuffer, bytesRead, it);
+    char* argStart = inputBuffer + it;
+
+    switch(ordinal) {
+      case 0: 
+      {
+        pct.boxTotal = getint(argStart, argLength);
+        if(pct.boxTotal < 0) {
+          printf("Invalid Box Total\n");
+          return pct;
+        }
+      } break;
+
+      case 1: 
+      {
+        pct.boxSpots = getint(argStart, argLength);
+
+        if(pct.boxSpots < 0 || pct.boxSpots > SUDOKU_DIGIT_NUM) {
+          printf("Invalid Number of Spots Available in the Cage\n");
+          return pct;
+        }
+      } break;
+
+      default: 
+      {
+        int digit = getint(argStart, argLength);
+        if(digit > 0 && digit <= SUDOKU_DIGIT_NUM) pct.digitsInUse |= 1 << digit;
+      }
+    }
+
+    it += (argLength + 1);
+    ++ordinal;
+  }
+
+  if(ordinal < 1) {
+    printf("Invalid Number of Arguments\n");
+    return pct;
+  }
+
+  pct.success = 1;
+  return pct;
+}
+
+int main(int argc, char **argv)
+{
   int quitSignal = 0;
 
   char inputBuffer[INPUT_BUFFER_SIZE];
 
   char errstrBuff[INPUT_BUFFER_SIZE];
   errstrBuff[INPUT_BUFFER_SIZE - 1] = '\0';
-  char* errstrp = errstrBuff;
+  char *errstrp = errstrBuff;
 
   while(!quitSignal) {
-
     printf("> ");
 
-    if(fgets(inputBuffer, INPUT_BUFFER_SIZE, stdin) != NULL){
+    if(fgets(inputBuffer, INPUT_BUFFER_SIZE, stdin) != NULL) {
       size_t bytesRead = strlen(inputBuffer);
 
       if(bytesRead > 0 && inputBuffer[bytesRead - 1] == '\n') {
         int it = 0;
-        int ordinal = 0;
+
+        if(it >= bytesRead) {
+          printf("Invalid Input\n");
+          break;
+        }
+
+        size_t argLength = arglen(inputBuffer, bytesRead, it);
+        char *argStart = &inputBuffer[it];
+        char *argterminate = argStart + argLength;
         int targetBox = INVALID;
-        int boxTotal = 0; // cages's sum of its digits
-        int boxSpots = 0; // number of digits in  the cage
-        int digitsInUse = 0;
 
-        while(it < bytesRead) {
-          size_t argLength = arglen(inputBuffer, bytesRead, it);
-          char* argStart = &inputBuffer[it];
-          
-          switch(ordinal) {
-            case 0: {
-              char* argterminate = argStart + argLength; 
-              *argterminate = '\0';
-              targetBox = parse_targetbox(argStart);
-              *argterminate = ' ';
-            } break;
+        *argterminate = 0;
+        targetBox = parse_targetbox(argStart);
+        *argterminate = ' ';
 
-            case 1: {
-              if(targetBox == INVALID) {
-                errstrp = "Invalid Box\0";
-                goto erronousEnd;
-              }
-              boxTotal = getint(argStart, argLength);
+        it += (argLength + 1);
 
-              if(boxTotal < 0) {
-                errstrp = "Invalid Box Total\0";
-                goto erronousEnd;
-              }
-            } break;
+        char *outstr = NULL;
+        switch (targetBox) {
+          case X33:
+          {
+            int x33Total = parsecmd_x33(it, bytesRead, inputBuffer);
+            if(x33Total == -1) break;
 
-            case 2: {
-              boxSpots = getint(argStart, argLength);
+            outstr = handle_x33(x33Total);
+          } break;
 
-              if(boxSpots < 0 || boxSpots > SUDOKU_DIGIT_NUM) {
-                errstrp = "Invalid Number of Spots Available in the Cage\0";
-                goto erronousEnd;
-              }
-            } break;
+          case CAGE_CONTAINED: 
+          {
+            struct parsecmd_cage_t pct = parsecmd_cage(it, bytesRead, inputBuffer);
+            if (!pct.success) break;
 
-            default: {
-              int digit = getint(argStart, argLength);
-              if(digit > 0 && digit <= SUDOKU_DIGIT_NUM) digitsInUse |= 1 << digit;
-            }
+            outstr = handle_cage(pct.boxTotal, pct.boxSpots, pct.digitsInUse, 0, 0);
+          } break;
+
+          case CAGE_OVERLAPPED:
+          {
+            struct parsecmd_cage_t pct = parsecmd_cage(it, bytesRead, inputBuffer);
+            if (!pct.success) break;
+
+            outstr = handle_cage(pct.boxTotal, pct.boxSpots, pct.digitsInUse, 1, 1);
+          } break;  
+
+          default:
+          {
+            printf("Invalid cmd\n");
           }
-          
-          // Advance index to next arg. +1 for whitespace
-          it += (argLength + 1); 
-          ++ordinal;
         }
 
-        if(ordinal < 2) {
-          errstrp = "Invalid Number of Arguments\0";
-          goto erronousEnd;
-        }
-
-        char* outstr;
-        switch(targetBox) {
-          case X33: {
-            outstr = "Not supported yet\n\0";
-          } break;
-          case CAGE_CONTAINED: {
-            outstr = handle_cage(boxTotal, boxSpots, digitsInUse, 0, 0);
-          } break;
-          case CAGE_OVERLAPPED: {
-            outstr = handle_cage(boxTotal, boxSpots, digitsInUse, 1, 1);
-          } break;
-        }
-        printf("%s", outstr);
+        if (outstr) printf(outstr);
       }
+      else
+        quitSignal = 1;
     }
-    else quitSignal = 1;
-
-    continue;
-
-  erronousEnd: 
-    printf("%s\n", errstrp);
   }
 }
